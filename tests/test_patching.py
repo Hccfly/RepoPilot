@@ -172,6 +172,32 @@ class PatchEngineTests(unittest.TestCase):
             parse_touched_files("--- a/one.txt\n+++ b/one.txt\n@@\n not a hunk\n")
         self.assertIn("@@ hunk", str(caught.exception))
 
+    def test_wrong_hunk_counts_are_recounted_by_git(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "repo"
+            _committed_repo(root, {"one.txt": b"one\n"})
+            engine = UnifiedDiffPatchEngine(
+                RepositoryWorkspace.discover(root), GitClient(root)
+            )
+            corrupt = "--- a/one.txt\n+++ b/one.txt\n@@ -1,9 +1,9 @@\n one\n+two\n"
+
+            proposal, baselines = engine.prepare(corrupt, "修正 hunk 计数")
+            engine.apply(
+                PatchRunRecord(
+                    run_id=uuid4().hex,
+                    repository=str(root),
+                    goal="修正",
+                    state={},
+                    proposal=proposal,
+                    baselines=baselines,
+                )
+            )
+
+            self.assertEqual(
+                (root / "one.txt").read_text(encoding="utf-8").splitlines(),
+                ["one", "two"],
+            )
+
     def test_traversal_and_secret_targets_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "repo"

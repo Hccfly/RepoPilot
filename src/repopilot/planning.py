@@ -20,6 +20,10 @@ class PlanningError(RuntimeError):
     pass
 
 
+class PlanParseError(PlanningError):
+    """The model's reply was not a usable JSON object; a retry can help."""
+
+
 @dataclass(slots=True)
 class ReadOnlyPlanningWorkflow:
     model: ModelClient
@@ -139,17 +143,27 @@ class ReadOnlyPlanningWorkflow:
             }
             for item in state.evidence
         ]
-        response = self.model.complete(
-            [
-                ModelMessage("system", PLANNER_SYSTEM_PROMPT),
-                ModelMessage(
-                    "user",
-                    planner_prompt(state.task.goal, evidence_payload, file_context),
-                ),
-            ],
-            json_mode=True,
-        )
-        return _parse_change_plan(response.text, set(state.inventory))
+        messages = [
+            ModelMessage("system", PLANNER_SYSTEM_PROMPT),
+            ModelMessage("user", planner_prompt(state.task.goal, evidence_payload, file_context)),
+        ]
+        for attempt in range(2):
+            response = self.model.complete(messages, json_mode=True)
+            try:
+                return _parse_change_plan(response.text, set(state.inventory))
+            except PlanParseError as exc:
+                if attempt == 1:
+                    raise
+                messages = [
+                    *messages,
+                    ModelMessage("assistant", response.text[:2000]),
+                    ModelMessage(
+                        "user",
+                        f"上一次输出无法解析（{exc}）。请只输出一个完整、合法的 JSON 对象，"
+                        "不要截断，也不要包含 Markdown。",
+                    ),
+                ]
+        raise PlanningError("Planner 未返回可用计划")
 
 
 def _parse_explorer(text: str) -> dict[str, Any]:
@@ -202,16 +216,16 @@ def _parse_change_plan(text: str, known_files: set[str]) -> ChangePlan:
 def _parse_json_object(text: str, source: str) -> dict[str, Any]:
     stripped = text.strip()
     if not stripped:
-        raise PlanningError(f"{source} 返回空内容")
+        raise PlanParseError(f"{source} 返回空内容")
     if stripped.startswith("```") and stripped.endswith("```"):
         lines = stripped.splitlines()
         stripped = "\n".join(lines[1:-1]).strip()
     try:
         payload = json.loads(stripped)
     except json.JSONDecodeError as exc:
-        raise PlanningError(f"{source} 返回的不是合法 JSON: {exc.msg}") from exc
+        raise PlanParseError(f"{source} 返回的不是合法 JSON: {exc.msg}") from exc
     if not isinstance(payload, dict):
-        raise PlanningError(f"{source} 必须返回 JSON 对象")
+        raise PlanParseError(f"{source} 必须返回 JSON 对象")
     return payload
 
 

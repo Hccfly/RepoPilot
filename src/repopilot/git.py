@@ -66,21 +66,20 @@ class GitClient:
         return self._run(*args).stdout
 
     def check_patch(self, unified_diff: str) -> None:
-        self._run(
-            "apply",
-            "--check",
-            "--whitespace=nowarn",
-            "-",
-            input_text=unified_diff,
-        )
+        self._apply("--check", unified_diff)
 
     def apply_patch(self, unified_diff: str) -> None:
-        self._run(
-            "apply",
-            "--whitespace=nowarn",
-            "-",
-            input_text=unified_diff,
-        )
+        self._apply(None, unified_diff)
+
+    def _apply(self, mode: str | None, unified_diff: str) -> None:
+        """Apply (or check) a patch, retrying with --recount when counts are wrong."""
+        args = ["apply", "--whitespace=nowarn"]
+        if mode:
+            args.append(mode)
+        try:
+            self._run(*args, "-", input_text=unified_diff)
+        except GitError:
+            self._run(*args, "--recount", "-", input_text=unified_diff)
 
     def head_sha(self) -> str:
         return self._run("rev-parse", "HEAD").stdout.strip()

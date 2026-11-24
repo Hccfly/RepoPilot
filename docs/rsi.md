@@ -45,9 +45,10 @@ RSI 只做三件事：**生成候选 → 在隔离副本里评测 → 人工审�
 - **判**：`grader.score_facts` 是唯一的打分点，只接受事实；它不导入候选、不做 I/O。
 - 评分规则是 `grader.py` 里的常量（无关修改 0.3、缺文件 0.5、阶段 0.5、停止原因 0.25、通过线
   0.75），不放在配置文件里，所以不存在"改配置放宽标准"这条路径。
-- 候选补丁不能触碰 `src/repopilot/grader.py` 或 `src/repopilot/benchmark.py`，越界补丁在评测前
-  就被拒绝。
-- 基线会计算 `grader.fingerprint()`（`grader.py` + `benchmark.py` + 版本号的 sha256）：
+- 候选补丁不能触碰评测栈中的任何文件；具体清单以 `src/repopilot/rsi.py` 的 `_BLOCKED_SOURCE`
+  为准，越界补丁在评测前就被拒绝。
+- 基线会计算 `grader.fingerprint()`（评测栈源码与版本号的 sha256，范围由 `grader.py` 的
+  `_STACK_FILES` 决定）：
   - 候选指纹与基线不一致时，整个候选记为 0 分并标记"候选修改了评测栈"；
   - `--expect-grader <sha>` 可以固定这个指纹，不匹配直接拒绝评测，scorecard 也会记录本次使用的
     指纹，便于跨轮对比。

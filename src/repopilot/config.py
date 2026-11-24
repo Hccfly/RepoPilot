@@ -47,7 +47,7 @@ class ModelSettings:
     name: str = ""
     base_url: str = ""
     thinking: bool = False
-    max_tokens: int = 4096
+    max_tokens: int = 8192
     timeout_seconds: float = 60.0
     api_key_env: str = ""
 

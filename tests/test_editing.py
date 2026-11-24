@@ -147,20 +147,45 @@ class EditingWorkflowTests(unittest.TestCase):
         self.assertEqual(record.status, PatchStatus.PROPOSED)
         self.assertEqual(model.calls, 4)
 
-    def test_corrupt_diff_is_retried_once(self) -> None:
+    def test_wrong_hunk_counts_apply_without_a_retry(self) -> None:
         corrupt = (
             '{"unified_diff":"--- a/app.py\\n+++ b/app.py\\n@@ -1,9 +1,9 @@\\n '
             'def value():\\n-    return \\"old\\"\\n+    return \\"new\\"\\n","rationale":"错的行数"}'
-        )
-        fixed = (
-            '{"unified_diff":"--- a/app.py\\n+++ b/app.py\\n@@ -1,2 +1,2 @@\\n '
-            'def value():\\n-    return \\"old\\"\\n+    return \\"new\\"\\n","rationale":"行数已修正"}'
         )
         model = _CountingModel(
             '{"queries":["value"],"files":["app.py"],"reason":"定位"}',
             '{"summary":"改 value","steps":[{"description":"改",'
             '"files":["app.py"]}],"risks":[]}',
             corrupt,
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            root = base / "repo"
+            _create_repo(root)
+            runtime = build_runtime(root, model_client=model)
+
+            record = runtime.propose_task(
+                "把 value 返回值改为 new", JsonPatchRunStore(base / "runs")
+            )
+
+        self.assertEqual(record.status, PatchStatus.PROPOSED)
+        self.assertEqual(model.calls, 3)
+
+    def test_unapplicable_diff_is_retried_once(self) -> None:
+        wrong_context = (
+            '{"unified_diff":"--- a/app.py\\n+++ b/app.py\\n@@ -1,2 +1,2 @@\\n '
+            'def value():\\n-    return \\"OLD\\"\\n+    return \\"new\\"\\n",'
+            '"rationale":"上下文不符"}'
+        )
+        fixed = (
+            '{"unified_diff":"--- a/app.py\\n+++ b/app.py\\n@@ -1,2 +1,2 @@\\n '
+            'def value():\\n-    return \\"old\\"\\n+    return \\"new\\"\\n","rationale":"修正后"}'
+        )
+        model = _CountingModel(
+            '{"queries":["value"],"files":["app.py"],"reason":"定位"}',
+            '{"summary":"改 value","steps":[{"description":"改",'
+            '"files":["app.py"]}],"risks":[]}',
+            wrong_context,
             fixed,
         )
         with tempfile.TemporaryDirectory() as temp:
@@ -174,7 +199,7 @@ class EditingWorkflowTests(unittest.TestCase):
             )
 
         self.assertEqual(record.status, PatchStatus.PROPOSED)
-        self.assertEqual(record.proposal.rationale, "行数已修正")
+        self.assertEqual(record.proposal.rationale, "修正后")
         self.assertEqual(model.calls, 4)
 
     def test_empty_editor_diff_twice_reports_the_model_reason(self) -> None:

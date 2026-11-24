@@ -618,13 +618,14 @@ def _doctor(runtime: RepoPilotRuntime) -> int:
     return 0
 
 
-def _propose(record: PatchRunRecord, store: JsonPatchRunStore) -> int:
+def _propose(record: PatchRunRecord, store: PatchRunStore) -> int:
+    location = getattr(store, "path", None) or store.root / (record.run_id + ".json")
     print(f"Run: {record.run_id}")
     print(f"Repository: {record.repository}")
     print(f"Status: {record.status}")
     print(f"涉及文件: {', '.join(record.proposal.touched_files)}")
     print(f"说明: {record.proposal.rationale}")
-    print(f"台账: {store.root / (record.run_id + '.json')}")
+    print(f"台账: {location}")
     print(f"下一步: repopilot diff {record.run_id}")
     print(f"批准并应用: repopilot apply {record.run_id}")
     return 0

@@ -120,6 +120,23 @@ class ReadOnlyPlanningTests(unittest.TestCase):
         self.assertEqual(state.phase, RunPhase.FAILED)
         self.assertIn("没有引用任何已读取文件", state.error)
 
+    def test_truncated_plan_is_retried_once(self) -> None:
+        model = _SequenceModel(
+            '{"queries":["parse_input"],"files":["src/parser.py"],"reason":"定位实现"}',
+            '{"summary":"截断的计划","steps":[{"description":"改',
+            '{"summary":"补充空输入处理","steps":[{"description":"在解析入口处理空输入",'
+            '"files":["src/parser.py"],"verification":[]}],"risks":[]}',
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "repo"
+            _create_repo(root)
+            runtime = build_runtime(root, model_client=model)
+
+            state = runtime.plan_task("修复解析器空输入异常")
+
+        self.assertEqual(state.phase, RunPhase.WAIT_APPROVAL)
+        self.assertEqual(len(model.calls), 3)
+
     def test_plan_may_reference_an_inventory_file_that_was_not_read(self) -> None:
         model = _SequenceModel(
             '{"queries":["parse_input"],"files":["src/parser.py"],"reason":"定位实现"}',
