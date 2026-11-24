@@ -83,6 +83,68 @@ class ReadOnlyPlanningTests(unittest.TestCase):
         self.assertEqual(state.phase, RunPhase.FAILED)
         self.assertIn("不是合法 JSON", state.error)
 
+    def test_plan_step_may_omit_files_for_verification_only_steps(self) -> None:
+        model = _SequenceModel(
+            '{"queries":["parse_input"],"files":["src/parser.py"],"reason":"定位实现"}',
+            '{"summary":"补充空输入处理","steps":['
+            '{"description":"在解析入口处理空输入","files":["src/parser.py"],'
+            '"verification":[]},'
+            '{"description":"运行测试确认","files":[],"verification":["pytest"]}'
+            '],"risks":[]}',
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "repo"
+            _create_repo(root)
+            runtime = build_runtime(root, model_client=model)
+
+            state = runtime.plan_task("修复解析器空输入异常")
+
+        self.assertEqual(state.phase, RunPhase.WAIT_APPROVAL)
+        self.assertEqual(len(state.plan.steps), 2)
+        self.assertEqual(state.plan.steps[0].files, ("src/parser.py",))
+        self.assertEqual(state.plan.steps[1].files, ())
+
+    def test_plan_without_any_file_reference_is_rejected(self) -> None:
+        model = _SequenceModel(
+            '{"queries":["parse_input"],"files":["src/parser.py"],"reason":"定位实现"}',
+            '{"summary":"空计划","steps":[{"description":"随手改改","files":[],'
+            '"verification":[]}],"risks":[]}',
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "repo"
+            _create_repo(root)
+            runtime = build_runtime(root, model_client=model)
+
+            state = runtime.plan_task("修复解析器")
+
+        self.assertEqual(state.phase, RunPhase.FAILED)
+        self.assertIn("没有引用任何已读取文件", state.error)
+
+    def test_plan_may_reference_an_inventory_file_that_was_not_read(self) -> None:
+        model = _SequenceModel(
+            '{"queries":["parse_input"],"files":["src/parser.py"],"reason":"定位实现"}',
+            '{"summary":"顺带更新说明","steps":['
+            '{"description":"在解析入口处理空输入","files":["src/parser.py"]},'
+            '{"description":"更新说明文件","files":["notes.txt"]}'
+            '],"risks":[]}',
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "repo"
+            _create_repo(root)
+            (root / "notes.txt").write_text("说明\n", encoding="utf-8")
+            subprocess.run(
+                ["git", "-C", str(root), "add", "notes.txt"],
+                check=True,
+                capture_output=True,
+            )
+            runtime = build_runtime(root, model_client=model)
+
+            state = runtime.plan_task("修复解析器空输入异常")
+
+        self.assertEqual(state.phase, RunPhase.WAIT_APPROVAL)
+        self.assertEqual(state.plan.steps[1].files, ("notes.txt",))
+        self.assertNotIn("notes.txt", state.inspected_files)
+
     def test_planner_cannot_reference_uninspected_file(self) -> None:
         model = _SequenceModel(
             '{"queries":["parse_input"],"files":["src/parser.py"],"reason":"定位实现"}',
@@ -97,7 +159,7 @@ class ReadOnlyPlanningTests(unittest.TestCase):
             state = runtime.plan_task("修复解析器")
 
         self.assertEqual(state.phase, RunPhase.FAILED)
-        self.assertIn("未读取文件", state.error)
+        self.assertIn("仓库清单之外", state.error)
 
 
 if __name__ == "__main__":

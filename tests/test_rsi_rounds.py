@@ -165,6 +165,7 @@ class RunRoundsTests(unittest.TestCase):
             records = run_rounds(
                 root,
                 scenario=_scenario(),
+                checks=(),
                 rounds=2,
                 store=store,
                 out_dir=Path(temp) / "artifacts",
@@ -193,6 +194,7 @@ class RunRoundsTests(unittest.TestCase):
             records = run_rounds(
                 root,
                 scenario=_scenario(),
+                checks=(),
                 rounds=2,
                 store=store,
                 out_dir=Path(temp) / "artifacts",
@@ -205,6 +207,23 @@ class RunRoundsTests(unittest.TestCase):
         self.assertIn("与历史候选相同", " ".join(records[1].reasons))
         self.assertFalse((root / "src" / "repopilot" / "probe_one.py").exists())
 
+    def test_artifacts_default_under_the_target_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = _repo(temp)
+            store = JsonPatchRunStore(Path(temp) / "runs")
+            model = _Model(_explorer(), _PLANNER, _editor("probe_one"))
+            run_rounds(
+                root,
+                scenario=_scenario(),
+                checks=(),
+                rounds=1,
+                store=store,
+                history_path=Path(temp) / "history.jsonl",
+                model_client=model,
+            )
+
+            self.assertTrue((root / "artifacts" / "rsi" / "round-1.diff").is_file())
+
     def test_a_broken_round_is_recorded_and_stops_the_loop(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = _repo(temp)
@@ -213,6 +232,7 @@ class RunRoundsTests(unittest.TestCase):
             records = run_rounds(
                 root,
                 scenario=_scenario(),
+                checks=(),
                 rounds=3,
                 store=store,
                 out_dir=Path(temp) / "artifacts",
@@ -238,6 +258,35 @@ class CliParserTests(unittest.TestCase):
         history = _parser().parse_args(["rsi", "history", "--limit", "5"])
         self.assertEqual(history.rsi_command, "history")
         self.assertEqual(history.limit, 5)
+
+    def test_history_command_reads_a_seeded_log(self) -> None:
+        import contextlib
+        import io
+
+        from repopilot.cli import main
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "history.jsonl"
+            history = RsiHistory(path)
+            history.append(
+                RoundRecord(
+                    index=1,
+                    run_id="r" * 32,
+                    timestamp="2026-01-01T00:00:00+00:00",
+                    scenario="bug_fix",
+                    patch_hash="abc",
+                    score=0.75,
+                    best_score=0.75,
+                    status="improved",
+                    reasons=(),
+                )
+            )
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = main(["rsi", "history", "--history", str(path)])
+
+        self.assertEqual(code, 0)
+        self.assertIn("bug_fix", output.getvalue())
 
 
 if __name__ == "__main__":

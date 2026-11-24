@@ -8,11 +8,12 @@ _IGNORE_PYCACHE = shutil.ignore_patterns("__pycache__", "*.pyc")
 
 from repopilot.benchmark import Scenario, run_scenario_facts
 from repopilot.contracts import RunPhase
-from repopilot.grader import score_facts
+from repopilot.grader import GradeSpec, score_facts
 from repopilot.rsi import (
     RsiError,
-    _run_scenarios,
+    _run_cases,
     assert_rsi_scope,
+    ensure_improvable,
     evaluate_repository,
     render_scorecard,
 )
@@ -121,6 +122,29 @@ class GradingTests(unittest.TestCase):
         self.assertLess(score.score, 0.75)
         self.assertIn("缺少预期文件", " ".join(score.reasons))
 
+    def test_expected_error_must_match_the_actual_failure(self) -> None:
+        spec = GradeSpec(
+            name="dirty",
+            expected_files=("app.py",),
+            expected_phase=RunPhase.WAIT_APPROVAL,
+            expected_stop_reason="",
+            expect_error=True,
+            expected_error="已有改动",
+        )
+        matching = score_facts(
+            spec,
+            touched=(),
+            phase=None,
+            stop_reason="",
+            error="补丁触及任务开始前已有改动的文件: app.py",
+        )
+        other = score_facts(
+            spec, touched=(), phase=None, stop_reason="", error="patch does not apply"
+        )
+        self.assertTrue(matching.passed)
+        self.assertFalse(other.passed)
+        self.assertIn("不符合预期", " ".join(other.reasons))
+
 
 class GraderIsolationTests(unittest.TestCase):
     def test_runner_facts_carry_no_score(self) -> None:
@@ -143,20 +167,25 @@ class GraderIsolationTests(unittest.TestCase):
                 grader_file.read_text(encoding="utf-8") + "\n# loosened\n",
                 encoding="utf-8",
             )
-            _, baseline_fingerprint = _run_scenarios(REPO / "src", REPO, [_TINY])
-            _, candidate_fingerprint = _run_scenarios(candidate, REPO, [_TINY])
+            _, _, baseline_fingerprint = _run_cases(REPO / "src", REPO, [_TINY], ())
+            _, _, candidate_fingerprint = _run_cases(candidate, REPO, [_TINY], ())
 
         self.assertTrue(baseline_fingerprint)
         self.assertNotEqual(baseline_fingerprint, candidate_fingerprint)
 
     def test_expect_grader_pin_is_enforced(self) -> None:
         with self.assertRaises(RsiError):
-            evaluate_repository(REPO, scenarios=[_TINY], expect_grader="0" * 64)
+            evaluate_repository(REPO, scenarios=[_TINY], checks=(), expect_grader="0" * 64)
+
+    def test_a_passing_scenario_is_not_improvable(self) -> None:
+        with self.assertRaises(RsiError) as caught:
+            ensure_improvable(REPO, _TINY, checks=())
+        self.assertIn("1.0", str(caught.exception))
 
 
 class EvaluateRepositoryTests(unittest.TestCase):
     def test_baseline_without_patch_matches_candidate(self) -> None:
-        report = evaluate_repository(REPO, scenarios=[_TINY])
+        report = evaluate_repository(REPO, scenarios=[_TINY], checks=())
 
         self.assertEqual(report.baseline_mean, 1.0)
         self.assertEqual(report.candidate_mean, 1.0)
@@ -164,13 +193,13 @@ class EvaluateRepositoryTests(unittest.TestCase):
         self.assertEqual(report.scenarios[0].delta, 0.0)
 
     def test_harmless_patch_keeps_the_score(self) -> None:
-        report = evaluate_repository(REPO, scenarios=[_TINY], patch=_NOOP_PATCH)
+        report = evaluate_repository(REPO, scenarios=[_TINY], checks=(), patch=_NOOP_PATCH)
 
         self.assertEqual(report.candidate_mean, 1.0)
         self.assertFalse(report.regression)
 
     def test_broken_patch_is_detected_as_a_regression(self) -> None:
-        report = evaluate_repository(REPO, scenarios=[_TINY], patch=_BROKEN_PATCH)
+        report = evaluate_repository(REPO, scenarios=[_TINY], checks=(), patch=_BROKEN_PATCH)
 
         self.assertEqual(report.candidate_mean, 0.0)
         self.assertTrue(report.regression)
@@ -178,11 +207,11 @@ class EvaluateRepositoryTests(unittest.TestCase):
 
     def test_out_of_scope_patch_is_refused_before_evaluation(self) -> None:
         with self.assertRaises(RsiError):
-            evaluate_repository(REPO, scenarios=[_TINY], patch=_OUT_OF_SCOPE_PATCH)
+            evaluate_repository(REPO, scenarios=[_TINY], checks=(), patch=_OUT_OF_SCOPE_PATCH)
 
     def test_scorecard_is_written_to_disk(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            report = evaluate_repository(REPO, scenarios=[_TINY], out_dir=temp)
+            report = evaluate_repository(REPO, scenarios=[_TINY], checks=(), out_dir=temp)
             markdown = (Path(temp) / "scorecard.md").read_text(encoding="utf-8")
             payload = (Path(temp) / "scorecard.json").read_text(encoding="utf-8")
 

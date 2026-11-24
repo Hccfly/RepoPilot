@@ -149,7 +149,7 @@ class ReadOnlyPlanningWorkflow:
             ],
             json_mode=True,
         )
-        return _parse_change_plan(response.text, set(state.inspected_files))
+        return _parse_change_plan(response.text, set(state.inventory))
 
 
 def _parse_explorer(text: str) -> dict[str, Any]:
@@ -159,7 +159,7 @@ def _parse_explorer(text: str) -> dict[str, Any]:
     return {"queries": _unique(queries)[:5], "files": _unique(files)[:12]}
 
 
-def _parse_change_plan(text: str, inspected_files: set[str]) -> ChangePlan:
+def _parse_change_plan(text: str, known_files: set[str]) -> ChangePlan:
     payload = _parse_json_object(text, "Planner")
     summary = payload.get("summary")
     if not isinstance(summary, str) or not summary.strip():
@@ -175,10 +175,12 @@ def _parse_change_plan(text: str, inspected_files: set[str]) -> ChangePlan:
         description = raw_step.get("description")
         if not isinstance(description, str) or not description.strip():
             raise PlanningError(f"Planner.steps[{index}].description 必须是非空字符串")
-        files = _string_list(raw_step.get("files"), f"Planner.steps[{index}].files", False)
-        unknown = [path for path in files if path not in inspected_files]
+        files = _string_list(
+            raw_step.get("files", []), f"Planner.steps[{index}].files", True
+        )
+        unknown = [path for path in files if path not in known_files]
         if unknown:
-            raise PlanningError(f"Planner 引用了未读取文件: {unknown}")
+            raise PlanningError(f"Planner 引用了仓库清单之外的文件: {unknown}")
         verification = _string_list(
             raw_step.get("verification", []),
             f"Planner.steps[{index}].verification",
@@ -192,6 +194,8 @@ def _parse_change_plan(text: str, inspected_files: set[str]) -> ChangePlan:
             )
         )
     risks = _string_list(payload.get("risks", []), "Planner.risks", True)
+    if not any(step.files for step in steps):
+        raise PlanningError("Planner 的计划没有引用任何已读取文件")
     return ChangePlan(summary.strip(), tuple(steps), tuple(_unique(risks)))
 
 

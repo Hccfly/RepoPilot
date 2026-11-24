@@ -115,6 +115,7 @@ class SearchCodeTool:
             "--no-heading",
             "--sort",
             "path",
+            "--fixed-strings",
             "--color",
             "never",
             "--hidden",

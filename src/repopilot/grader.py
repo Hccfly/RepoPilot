@@ -25,7 +25,7 @@ PHASE_PENALTY = 0.5
 STOP_REASON_PENALTY = 0.25
 PASS_THRESHOLD = 0.75
 
-_STACK_FILES = ("grader.py", "benchmark.py")
+_STACK_FILES = ("grader.py", "benchmark.py", "checks.py")
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +37,7 @@ class GradeSpec:
     expected_phase: RunPhase
     expected_stop_reason: str
     expect_error: bool = False
+    expected_error: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,9 +57,16 @@ def score_facts(
     error: str | None = None,
 ) -> Score:
     if spec.expect_error:
-        if error:
-            return Score(spec.name, 1.0, True, ())
-        return Score(spec.name, 0.0, False, ("期望该场景失败，但候选没有失败",))
+        if not error:
+            return Score(spec.name, 0.0, False, ("期望该场景失败，但候选没有失败",))
+        if spec.expected_error and spec.expected_error not in error:
+            return Score(
+                spec.name,
+                0.0,
+                False,
+                (f"失败原因不符合预期（期望包含「{spec.expected_error}」）: {error}",),
+            )
+        return Score(spec.name, 1.0, True, ())
 
     reasons: list[str] = []
     score = 1.0
@@ -84,6 +92,15 @@ def score_facts(
 
     score = round(max(0.0, min(1.0, score)), 3)
     return Score(spec.name, score, score >= PASS_THRESHOLD, tuple(reasons))
+
+
+def score_check(name: str, *, status: str, detail: str = "") -> Score:
+    """Grade one behavioural check. ``skip`` means "not applicable here"."""
+    if status == "ok":
+        return Score(name, 1.0, True, ())
+    if status == "skip":
+        return Score(name, 1.0, True, (f"跳过: {detail}" if detail else "跳过",))
+    return Score(name, 0.0, False, (detail or "检查未通过",))
 
 
 def fingerprint() -> str:

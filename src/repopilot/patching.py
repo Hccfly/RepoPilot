@@ -20,6 +20,9 @@ class PatchError(RuntimeError):
     pass
 
 
+_HUNK_HEADER = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@", re.MULTILINE)
+
+
 class PatchConflict(PatchError):
     pass
 
@@ -359,6 +362,8 @@ def parse_touched_files(unified_diff: str) -> tuple[str, ...]:
     forbidden = ("GIT binary patch", "Binary files ", "rename from ", "rename to ")
     if any(marker in unified_diff for marker in forbidden):
         raise PatchPolicyError("P1 不支持 binary patch 或 rename")
+    if not _HUNK_HEADER.search(unified_diff):
+        raise PatchError("unified diff 缺少合法的 @@ hunk 头")
 
     lines = unified_diff.splitlines()
     touched: list[str] = []

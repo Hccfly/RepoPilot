@@ -80,6 +80,7 @@ class Scenario:
     max_repairs: int = 1
     dirty_files: tuple[str, ...] = ()
     expect_error: bool = False
+    expected_error: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -95,6 +96,7 @@ class Scenario:
             "max_repairs": self.max_repairs,
             "dirty_files": list(self.dirty_files),
             "expect_error": self.expect_error,
+            "expected_error": self.expected_error,
         }
 
     @classmethod
@@ -112,6 +114,7 @@ class Scenario:
             max_repairs=int(value.get("max_repairs", 1)),
             dirty_files=tuple(str(item) for item in value.get("dirty_files", ())),
             expect_error=bool(value.get("expect_error", False)),
+            expected_error=str(value.get("expected_error", "")),
         )
 
     def grade_spec(self) -> GradeSpec:
@@ -121,6 +124,7 @@ class Scenario:
             expected_phase=self.expected_phase,
             expected_stop_reason=self.expected_stop_reason,
             expect_error=self.expect_error,
+            expected_error=self.expected_error,
         )
 
 
@@ -264,6 +268,7 @@ def _git(root: Path, *args: str) -> None:
 
 
 _APP = 'def value():\n    return "old"\n'
+_OTHER = "x = 1\n"
 _EXPLORER = '{"queries":["value"],"files":["app.py"],"reason":"定位返回值"}'
 _PLANNER = (
     '{"summary":"更新返回值","steps":[{"description":"修改 value",'
@@ -273,15 +278,24 @@ _EDITOR = (
     '{"unified_diff":"--- a/app.py\\n+++ b/app.py\\n@@ -1,2 +1,2 @@\\n '
     'def value():\\n-    return \\"old\\"\\n+    return \\"new\\"\\n","rationale":"按计划更新"}'
 )
+_EDITOR_UNREAD = (
+    '{"unified_diff":"--- a/other.py\\n+++ b/other.py\\n@@ -1,1 +1,2 @@\\n '
+    'x = 1\\n+y = 2\\n","rationale":"顺手改未读取文件"}'
+)
 _REPAIR = (
     '{"unified_diff":"--- a/app.py\\n+++ b/app.py\\n@@ -1,2 +1,2 @@\\n '
     'def value():\\n-    return \\"new\\"\\n+    return \\"fixed\\"\\n","rationale":"修复返回值"}'
+)
+_REPAIR_OUT_OF_SCOPE = (
+    '{"unified_diff":"--- a/other.py\\n+++ b/other.py\\n@@ -1,1 +1,2 @@\\n '
+    'x = 1\\n+y = 2\\n","rationale":"越界修复"}'
 )
 _APPROVE = '{"decision":"approve","summary":"diff 与目标一致","findings":[]}'
 _REQUEST_CHANGES = (
     '{"decision":"request_changes","summary":"缺少边界处理",'
     '"findings":[{"severity":"high","file":"app.py","line":2,"message":"未处理空输入"}]}'
 )
+_REJECT = '{"decision":"reject","summary":"方向完全错误","findings":[]}'
 
 BUILTIN_SCENARIOS: tuple[Scenario, ...] = (
     Scenario(
@@ -341,6 +355,55 @@ BUILTIN_SCENARIOS: tuple[Scenario, ...] = (
         expected_stop_reason="",
         dirty_files=("app.py",),
         expect_error=True,
+        expected_error="补丁触及任务开始前已有改动的文件",
+    ),
+    Scenario(
+        name="review_reject",
+        description="审查直接拒绝时退回 REPAIR，而不是进入 DONE",
+        goal="把 value 返回值改为 new",
+        files={"app.py": _APP},
+        responses=(_EXPLORER, _PLANNER, _EDITOR, _REJECT),
+        verify_outcomes=(True,),
+        expected_files=("app.py",),
+        expected_phase=RunPhase.REPAIR,
+        expected_stop_reason="review_rejected",
+    ),
+    Scenario(
+        name="repair_budget_exhausted",
+        description="修复后仍然失败时用尽预算并进入 FAILED",
+        goal="把 value 返回值改为 new",
+        files={"app.py": _APP},
+        responses=(_EXPLORER, _PLANNER, _EDITOR, _REPAIR),
+        verify_outcomes=(False, False),
+        expected_files=("app.py",),
+        expected_phase=RunPhase.FAILED,
+        expected_stop_reason="repair_budget_exhausted",
+    ),
+    Scenario(
+        name="repair_out_of_scope",
+        description="修复补丁越出已批准范围时整体拒绝",
+        goal="把 value 返回值改为 new",
+        files={"app.py": _APP, "other.py": _OTHER},
+        responses=(_EXPLORER, _PLANNER, _EDITOR, _REPAIR_OUT_OF_SCOPE),
+        verify_outcomes=(False,),
+        expected_files=("app.py",),
+        expected_phase=RunPhase.REPAIR,
+        expected_stop_reason="",
+        expect_error=True,
+        expected_error="修复补丁越出已批准范围",
+    ),
+    Scenario(
+        name="editor_unread_file",
+        description="编辑节点修改未读取文件时被拒绝",
+        goal="把 value 返回值改为 new",
+        files={"app.py": _APP, "other.py": _OTHER},
+        responses=(_EXPLORER, _PLANNER, _EDITOR_UNREAD),
+        verify_outcomes=(),
+        expected_files=("app.py",),
+        expected_phase=RunPhase.WAIT_APPROVAL,
+        expected_stop_reason="",
+        expect_error=True,
+        expected_error="Editor 尝试修改未读取文件",
     ),
 )
 

@@ -8,10 +8,12 @@ from uuid import uuid4
 from repopilot.git import GitClient
 from repopilot.patching import (
     PatchConflict,
+    PatchError,
     PatchPolicyError,
     PatchRunRecord,
     PatchStatus,
     UnifiedDiffPatchEngine,
+    parse_touched_files,
 )
 from repopilot.persistence import JsonPatchRunStore, RunStoreError
 from repopilot.policy import PermissionPolicy
@@ -164,6 +166,11 @@ class PatchEngineTests(unittest.TestCase):
                 engine.prepare(patch, "第二个 hunk 冲突")
             self.assertEqual((root / "one.txt").read_bytes(), originals["one.txt"])
             self.assertEqual((root / "two.txt").read_bytes(), originals["two.txt"])
+
+    def test_hunkless_diff_is_rejected_with_a_clear_error(self) -> None:
+        with self.assertRaises(PatchError) as caught:
+            parse_touched_files("--- a/one.txt\n+++ b/one.txt\n@@\n not a hunk\n")
+        self.assertIn("@@ hunk", str(caught.exception))
 
     def test_traversal_and_secret_targets_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

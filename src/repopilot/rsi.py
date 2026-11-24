@@ -21,9 +21,10 @@ from pathlib import Path
 from typing import Any
 
 from .benchmark import BUILTIN_SCENARIOS, Scenario, Score
+from .checks import BUILTIN_CHECKS, Check
 from .contracts import RunPhase
 from .git import GitClient, GitError
-from .grader import score_facts
+from .grader import score_check, score_facts
 from .patching import PatchError, parse_touched_files
 from .persistence import PatchRunStore, default_run_store_root
 from .rsi_history import (
@@ -40,7 +41,11 @@ EVALUATION_TIMEOUT_SECONDS = 1800
 _BLOCKED_PREFIXES = ("tests/", "docs/", ".github/")
 _BLOCKED_FILES = ("pyproject.toml", "README.md", "AGENTS.md")
 _SCOPED_PREFIX = "src/repopilot/"
-_BLOCKED_SOURCE = ("src/repopilot/benchmark.py", "src/repopilot/grader.py")
+_BLOCKED_SOURCE = (
+    "src/repopilot/benchmark.py",
+    "src/repopilot/grader.py",
+    "src/repopilot/checks.py",
+)
 
 _RUNNER = r"""
 import json
@@ -48,13 +53,26 @@ import sys
 from pathlib import Path
 
 from repopilot.benchmark import Scenario, run_scenario_facts
+from repopilot.checks import Check, run_check
 from repopilot.grader import fingerprint
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-facts = [run_scenario_facts(Scenario.from_dict(item)) for item in payload]
+scenarios = [
+    run_scenario_facts(Scenario.from_dict(item))
+    for item in payload.get("scenarios", [])
+]
+checks = [run_check(Check.from_dict(item)) for item in payload.get("checks", [])]
 sys.stdout.write(
     json.dumps(
-        {"facts": facts, "grader_fingerprint": fingerprint()}, ensure_ascii=False
+        {
+            "scenarios": scenarios,
+            "checks": checks,
+            "grader_fingerprint": fingerprint(),
+        },
+        ensure_ascii=False,
     )
 )
 """
@@ -87,23 +105,46 @@ class ScenarioDelta:
 
 
 @dataclass(frozen=True, slots=True)
+class CheckDelta:
+    name: str
+    baseline: str
+    candidate: str
+    passed: bool
+    reasons: tuple[str, ...]
+    skipped: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class EvaluationReport:
     repository: str
     patch: str | None
     scenarios: tuple[ScenarioDelta, ...]
     grader_fingerprint: str = ""
+    checks: tuple[CheckDelta, ...] = ()
 
     @property
     def baseline_mean(self) -> float:
-        return _mean(item.baseline for item in self.scenarios)
+        return _mean(self._values("baseline"))
 
     @property
     def candidate_mean(self) -> float:
-        return _mean(item.candidate for item in self.scenarios)
+        return _mean(self._values("candidate"))
 
     @property
     def regression(self) -> bool:
         return self.candidate_mean < self.baseline_mean
+
+    def _values(self, side: str) -> list[float]:
+        values = [
+            getattr(item, side)
+            for item in self.scenarios
+        ]
+        values += [
+            1.0 if getattr(item, side) == "ok" else 0.0
+            for item in self.checks
+            if not item.skipped
+        ]
+        return values
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -123,6 +164,17 @@ class EvaluationReport:
                     "reasons": list(item.reasons),
                 }
                 for item in self.scenarios
+            ],
+            "checks": [
+                {
+                    "check": item.name,
+                    "baseline": item.baseline,
+                    "candidate": item.candidate,
+                    "passed": item.passed,
+                    "skipped": item.skipped,
+                    "reasons": list(item.reasons),
+                }
+                for item in self.checks
             ],
         }
 
@@ -145,36 +197,62 @@ def baseline_snapshot(
     repository: str | Path,
     scenarios: Sequence[Scenario],
     *,
+    checks: Sequence[Check] | None = None,
     expect_grader: str | None = None,
-) -> tuple[dict[str, dict[str, Any]], str]:
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], str]:
     """Run the pristine source once and pin the grader fingerprint."""
     root = Path(repository).expanduser().resolve()
     source = root / "src"
     if not (source / "repopilot").is_dir():
         raise RsiError(f"目标仓库缺少 src/repopilot: {root}")
-    scores, fingerprint = _run_scenarios(source, root, tuple(scenarios))
+    scores, check_status, fingerprint = _run_cases(
+        source, root, tuple(scenarios), tuple(checks if checks is not None else BUILTIN_CHECKS)
+    )
     if expect_grader and fingerprint != expect_grader:
         raise RsiError(
             "受信 grader 指纹不匹配："
             f"期望 {expect_grader}，实际 {fingerprint or '（无法计算）'}"
         )
-    return scores, fingerprint
+    return scores, check_status, fingerprint
+
+
+def ensure_improvable(
+    repository: str | Path,
+    scenario: Scenario,
+    *,
+    checks: Sequence[Check] | None = None,
+    expect_grader: str | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], str]:
+    """Refuse to generate candidates for a scenario that already scores 1.0."""
+    snapshot = baseline_snapshot(
+        repository, (scenario,), checks=checks, expect_grader=expect_grader
+    )
+    score = snapshot[0][scenario.name]["score"]
+    if score >= 1.0:
+        raise RsiError(
+            f"基准场景 {scenario.name} 已经是 1.0，没有可改进项；"
+            "请先引入一个真实失败的场景或行为"
+        )
+    return snapshot
 
 
 def evaluate_repository(
     repository: str | Path,
     *,
     scenarios: Sequence[Scenario] | None = None,
+    checks: Sequence[Check] | None = None,
     patch: str | None = None,
     out_dir: str | Path | None = None,
     expect_grader: str | None = None,
-    baseline: tuple[dict[str, dict[str, Any]], str] | None = None,
+    baseline: tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], str]
+    | None = None,
 ) -> EvaluationReport:
     root = Path(repository).expanduser().resolve()
     source = root / "src"
     if not (source / "repopilot").is_dir():
         raise RsiError(f"目标仓库缺少 src/repopilot: {root}")
     chosen = tuple(scenarios) if scenarios else BUILTIN_SCENARIOS
+    chosen_checks = tuple(checks) if checks is not None else BUILTIN_CHECKS
     if patch:
         try:
             assert_rsi_scope(parse_touched_files(patch))
@@ -182,11 +260,11 @@ def evaluate_repository(
             raise RsiError(f"候选补丁无法解析: {exc}") from exc
 
     if baseline is None:
-        baseline_scores, baseline_fingerprint = baseline_snapshot(
-            root, chosen, expect_grader=expect_grader
+        baseline_scores, baseline_checks, baseline_fingerprint = baseline_snapshot(
+            root, chosen, checks=chosen_checks, expect_grader=expect_grader
         )
     else:
-        baseline_scores, baseline_fingerprint = baseline
+        baseline_scores, baseline_checks, baseline_fingerprint = baseline
         if expect_grader and baseline_fingerprint != expect_grader:
             raise RsiError(
                 "受信 grader 指纹不匹配："
@@ -199,15 +277,18 @@ def evaluate_repository(
         workdir = tempfile.TemporaryDirectory()
         candidate_source = _prepare_candidate(source, patch, Path(workdir.name))
     try:
-        candidate, candidate_fingerprint = _run_scenarios(
-            candidate_source, root, chosen
+        candidate, candidate_checks, candidate_fingerprint = _run_cases(
+            candidate_source, root, chosen, chosen_checks
         )
     finally:
         if workdir is not None:
             workdir.cleanup()
     if patch and candidate_fingerprint != baseline_fingerprint:
         candidate = _failed_outcomes(
-            chosen, "候选修改了评测栈（grader/benchmark 指纹变化），拒绝评分"
+            chosen, "候选修改了评测栈（grader/benchmark/checks 指纹变化），拒绝评分"
+        )
+        candidate_checks = _failed_check_status(
+            chosen_checks, "候选修改了评测栈（grader/benchmark/checks 指纹变化）"
         )
 
     deltas = tuple(
@@ -220,7 +301,12 @@ def evaluate_repository(
         )
         for scenario in chosen
     )
-    report = EvaluationReport(str(root), patch, deltas, baseline_fingerprint)
+    check_deltas = tuple(
+        _check_delta(check, baseline_checks, candidate_checks) for check in chosen_checks
+    )
+    report = EvaluationReport(
+        str(root), patch, deltas, baseline_fingerprint, check_deltas
+    )
 
     if out_dir is not None:
         output = Path(out_dir).expanduser()
@@ -231,6 +317,26 @@ def evaluate_repository(
         )
         (output / "scorecard.md").write_text(render_scorecard(report), encoding="utf-8")
     return report
+
+
+def _check_delta(
+    check: Check,
+    baseline: dict[str, dict[str, Any]],
+    candidate: dict[str, dict[str, Any]],
+) -> CheckDelta:
+    base = baseline.get(check.name, {"status": "skip", "detail": ""})
+    cand = candidate.get(check.name, {"status": "fail", "detail": "候选没有返回该检查"})
+    status = str(cand.get("status", "fail"))
+    detail = str(cand.get("detail", ""))
+    score = score_check(check.name, status=status, detail=detail)
+    return CheckDelta(
+        name=check.name,
+        baseline=str(base.get("status", "skip")),
+        candidate=status,
+        passed=score.passed,
+        reasons=score.reasons,
+        skipped=status == "skip",
+    )
 
 
 def render_scorecard(report: EvaluationReport) -> str:
@@ -257,18 +363,38 @@ def render_scorecard(report: EvaluationReport) -> str:
             f"| {item.scenario} | {item.baseline} | {item.candidate} | "
             f"{item.delta:+} | {'是' if item.passed else '否'} | {reasons} |"
         )
+    if report.checks:
+        lines.extend(
+            ["", "| 检查 | 基线 | 候选 | 通过 | 原因 |", "| --- | --- | --- | --- | --- |"]
+        )
+        for check in report.checks:
+            reasons = "；".join(check.reasons) or "-"
+            state = "跳过" if check.skipped else ("是" if check.passed else "否")
+            lines.append(
+                f"| {check.name} | {check.baseline} | {check.candidate} | "
+                f"{state} | {reasons} |"
+            )
     lines.append("")
     lines.append("评分由固定评分器在候选之外计算；应用补丁前请人工审阅 diff。")
     return "\n".join(lines) + "\n"
 
 
-def _run_scenarios(
-    source_root: Path, cwd: Path, scenarios: Sequence[Scenario]
-) -> tuple[dict[str, dict[str, Any]], str]:
+def _run_cases(
+    source_root: Path,
+    cwd: Path,
+    scenarios: Sequence[Scenario],
+    checks: Sequence[Check],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], str]:
     with tempfile.TemporaryDirectory() as temp:
-        payload = Path(temp) / "scenarios.json"
+        payload = Path(temp) / "cases.json"
         payload.write_text(
-            json.dumps([scenario.to_dict() for scenario in scenarios], ensure_ascii=False),
+            json.dumps(
+                {
+                    "scenarios": [scenario.to_dict() for scenario in scenarios],
+                    "checks": [check.to_dict() for check in checks],
+                },
+                ensure_ascii=False,
+            ),
             encoding="utf-8",
         )
         env = dict(os.environ)
@@ -283,21 +409,59 @@ def _run_scenarios(
                 check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            return _failed_outcomes(scenarios, f"{type(exc).__name__}: {exc}"), ""
+            return _failure(scenarios, checks, f"{type(exc).__name__}: {exc}")
     if completed.returncode != 0:
         detail = completed.stderr.decode("utf-8", errors="replace").strip()
-        return _failed_outcomes(scenarios, detail[-800:] or "评测子进程失败"), ""
+        return _failure(scenarios, checks, detail[-800:] or "评测子进程失败")
     try:
-        payload_data = json.loads(completed.stdout.decode("utf-8"))
+        data = json.loads(completed.stdout.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        return _failed_outcomes(scenarios, f"候选输出不是合法 JSON: {exc}"), ""
-    if not isinstance(payload_data, dict):
-        return _failed_outcomes(scenarios, "候选输出不是对象"), ""
-    fingerprint = str(payload_data.get("grader_fingerprint") or "")
+        return _failure(scenarios, checks, f"候选输出不是合法 JSON: {exc}")
+    if not isinstance(data, dict):
+        return _failure(scenarios, checks, "候选输出不是对象")
+    fingerprint = str(data.get("grader_fingerprint") or "")
     return (
-        _score_facts_payload(scenarios, payload_data.get("facts")),
+        _score_facts_payload(scenarios, data.get("scenarios")),
+        _check_status_map(checks, data.get("checks")),
         fingerprint,
     )
+
+
+def _failure(
+    scenarios: Sequence[Scenario], checks: Sequence[Check], error: str
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], str]:
+    return (
+        _failed_outcomes(scenarios, error),
+        _failed_check_status(checks, error),
+        "",
+    )
+
+
+def _check_status_map(
+    checks: Sequence[Check], payload: Any
+) -> dict[str, dict[str, Any]]:
+    if not isinstance(payload, list):
+        return _failed_check_status(checks, "候选没有返回检查结果")
+    by_name = {
+        str(item.get("check", "")): item for item in payload if isinstance(item, dict)
+    }
+    status: dict[str, dict[str, Any]] = {}
+    for check in checks:
+        item = by_name.get(check.name)
+        if item is None:
+            status[check.name] = {"status": "fail", "detail": "候选没有返回该检查"}
+            continue
+        value = str(item.get("status", "fail"))
+        if value not in {"ok", "fail", "skip"}:
+            value = "fail"
+        status[check.name] = {"status": value, "detail": str(item.get("detail", ""))}
+    return status
+
+
+def _failed_check_status(
+    checks: Sequence[Check], error: str
+) -> dict[str, dict[str, Any]]:
+    return {check.name: {"status": "fail", "detail": error} for check in checks}
 
 
 def _score_facts_payload(
@@ -392,17 +556,25 @@ def run_rounds(
     history_path: str | Path | None = None,
     model_client=None,
     expect_grader: str | None = None,
+    checks: Sequence[Check] | None = None,
 ) -> tuple[RoundRecord, ...]:
     """Generate and score one candidate per round. Never applies anything."""
     if rounds < 1:
         raise RsiError("rounds 必须大于 0")
+    chosen_checks = tuple(checks) if checks is not None else BUILTIN_CHECKS
     root = Path(repository).expanduser().resolve()
-    output = Path(out_dir or "artifacts/rsi").expanduser()
+    output = (
+        Path(out_dir).expanduser()
+        if out_dir is not None
+        else root / "artifacts" / "rsi"
+    )
     output.mkdir(parents=True, exist_ok=True)
     history = RsiHistory(history_path or default_rsi_history_path(root))
     runtime = build_runtime(root, model_client=model_client)
 
-    baseline = baseline_snapshot(root, (scenario,), expect_grader=expect_grader)
+    baseline = ensure_improvable(
+        root, scenario, checks=chosen_checks, expect_grader=expect_grader
+    )
     best = baseline[0][scenario.name]["score"]
     seen = set(history.patch_hashes())
     records: list[RoundRecord] = []
@@ -443,7 +615,11 @@ def run_rounds(
             reasons = ("与历史候选相同，跳过评测",)
         else:
             report = evaluate_repository(
-                root, scenarios=(scenario,), patch=diff, baseline=baseline
+                root,
+                scenarios=(scenario,),
+                checks=chosen_checks,
+                patch=diff,
+                baseline=baseline,
             )
             delta = report.scenarios[0]
             score = delta.candidate

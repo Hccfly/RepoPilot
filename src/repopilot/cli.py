@@ -29,6 +29,7 @@ from .rsi import (
     RsiError,
     assert_rsi_scope,
     default_rsi_history_path,
+    ensure_improvable,
     evaluate_repository,
     render_scorecard,
     run_rounds,
@@ -246,7 +247,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     rsi_propose.add_argument("--scenario", required=True)
     rsi_propose.add_argument("--repo", default=".")
-    rsi_propose.add_argument("--out", default="artifacts/rsi")
+    rsi_propose.add_argument("--out", default="")
     rsi_propose.add_argument("--expect-grader", default="")
 
     rsi_run = rsi_commands.add_parser(
@@ -255,7 +256,7 @@ def _parser() -> argparse.ArgumentParser:
     rsi_run.add_argument("--scenario", required=True)
     rsi_run.add_argument("--rounds", type=int, default=3)
     rsi_run.add_argument("--repo", default=".")
-    rsi_run.add_argument("--out", default="artifacts/rsi")
+    rsi_run.add_argument("--out", default="")
     rsi_run.add_argument("--history", default="")
     rsi_run.add_argument("--expect-grader", default="")
 
@@ -452,10 +453,10 @@ def _ci(args: argparse.Namespace, store: PatchRunStore) -> int:
 def _rsi(args: argparse.Namespace, store: PatchRunStore) -> int:
     if args.rsi_command == "history":
         return _rsi_show_history(args)
-    scenarios = _rsi_scenarios(args.scenarios)
-    expect_grader = args.expect_grader or None
     if args.rsi_command == "run":
         return _rsi_run(args, store)
+    scenarios = _rsi_scenarios(args.scenarios)
+    expect_grader = args.expect_grader or None
     if args.rsi_command == "eval":
         report = evaluate_repository(
             args.repo,
@@ -550,6 +551,10 @@ def _rsi_scenarios(names: list[str]):
 
 def _rsi_propose(args: argparse.Namespace, store: PatchRunStore) -> int:
     scenario = _scenario_by_name(args.scenario)
+    root = Path(args.repo).expanduser().resolve()
+    baseline = ensure_improvable(
+        root, scenario, expect_grader=args.expect_grader or None
+    )
 
     runtime = build_runtime(
         args.repo, config_path=args.config, model_provider=args.provider
@@ -563,7 +568,11 @@ def _rsi_propose(args: argparse.Namespace, store: PatchRunStore) -> int:
     record = runtime.propose_task(goal, store)
     assert_rsi_scope(record.proposal.touched_files)
 
-    output = Path(args.out or "artifacts/rsi").expanduser()
+    output = (
+        Path(args.out).expanduser()
+        if args.out
+        else Path(args.repo).expanduser().resolve() / "artifacts" / "rsi"
+    )
     output.mkdir(parents=True, exist_ok=True)
     patch_path = output / "candidate.diff"
     patch_path.write_text(record.proposal.unified_diff, encoding="utf-8")
@@ -572,7 +581,7 @@ def _rsi_propose(args: argparse.Namespace, store: PatchRunStore) -> int:
         args.repo,
         patch=record.proposal.unified_diff,
         out_dir=output,
-        expect_grader=args.expect_grader or None,
+        baseline=baseline,
     )
     print(f"Run: {record.run_id}")
     print(f"候选补丁: {patch_path}")

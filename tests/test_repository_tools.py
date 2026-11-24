@@ -52,6 +52,36 @@ class RepositoryToolTests(unittest.TestCase):
             self.assertNotIn("node_modules/package/index.js", inventory.metadata["files"])
             self.assertEqual([hit["path"] for hit in search.metadata["hits"]], ["visible.py"])
 
+    def test_search_treats_the_query_as_a_literal(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            subprocess.run(
+                ["git", "init", "-q", str(root)],
+                check=True,
+                capture_output=True,
+            )
+            (root / "calc.py").write_text(
+                "def add(a, b):\n    return a + b\n", encoding="utf-8"
+            )
+            runtime = build_runtime(root, model_client=_UnusedModel())
+
+            for query in ("add(", "a + b"):
+                with self.subTest(query=query):
+                    search = runtime.tools.execute(
+                        runtime.tool_context,
+                        ToolCall("search_code", {"query": query, "limit": 20}),
+                    )
+                    self.assertIn(
+                        "calc.py", [hit["path"] for hit in search.metadata["hits"]]
+                    )
+
+            # An invalid regex must not raise: the query is matched literally.
+            unmatched = runtime.tools.execute(
+                runtime.tool_context,
+                ToolCall("search_code", {"query": "[", "limit": 20}),
+            )
+            self.assertEqual(unmatched.metadata["hits"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
