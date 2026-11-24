@@ -1,0 +1,62 @@
+[workspace]
+max_file_bytes = 1000000
+max_search_results = 100
+max_inventory_files = 500
+max_context_files = 8
+max_context_chars = 6000
+# 并行只读检索与读取的上限；结果始终按输入顺序归并
+max_parallel_reads = 4
+
+[execution]
+command_timeout_seconds = 120
+max_repair_attempts = 1
+max_output_chars = 8000
+# 同时运行的验证动作数；每个动作仍是独立子进程
+max_parallel_verifications = 2
+
+[sandbox]
+# local：在仓库目录直接执行验证
+# command：用固定 argv 前缀包一层（容器/远程包装器）
+# remote：连接独立沙箱服务，只发送动作名
+mode = "local"
+# 仅 command 模式使用；{workspace} 会作为一个完整参数替换为仓库路径
+command = []
+# 仅 remote 模式使用
+host = "127.0.0.1"
+port = 8765
+token_env = "REPOPILOT_SANDBOX_TOKEN"
+# 选择租户；服务端用 --tenant name=path 定义多个租户
+tenant = "default"
+# 客户端校验服务端证书；服务端用 sandbox serve --cert/--key 启动 TLS
+tls = false
+ca_file = ""
+# 仅 docker 模式使用：每个动作一个 --rm 容器，工作区挂载到 /work
+image = ""
+network = "none"
+memory = ""
+cpus = ""
+user = ""
+# >0 启用容器池：后台预建容器，并发验证时更快；串行场景建议保持 0
+pool_size = 0
+# 镜像预热策略：never 不检查 / missing 缺失时拉取 / always 每次拉取
+pull = "missing"
+
+[permissions]
+read = "allow"
+edit = "ask"
+verify = "ask"
+# Git 提交默认关闭；改成 "ask" 后仍需显式执行 repopilot commit
+git_write = "deny"
+network = "deny"
+
+[model]
+# 内置 provider: deepseek（默认）、openai、anthropic；也可是已安装插件的名称
+provider = "deepseek"
+# 留空表示使用 provider 的默认模型与地址
+name = "deepseek-v4-flash"
+base_url = "https://api.deepseek.com"
+# 覆盖凭据环境变量名；留空时使用 provider 默认值（如 DEEPSEEK_API_KEY）
+api_key_env = ""
+thinking = false
+max_tokens = 4096
+timeout_seconds = 60
